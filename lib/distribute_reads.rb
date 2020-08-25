@@ -44,22 +44,44 @@ module DistributeReads
       when "PostgreSQL", "PostGIS"
         # cache the version number
         @server_version_num ||= {}
+        @aurora_postgresql ||= {}
+        @aurora_readonly ||= {}
         cache_key = connection.pool.object_id
-        @server_version_num[cache_key] ||= connection.select_all("SHOW server_version_num").first["server_version_num"].to_i
 
-        lag_condition =
-          if @server_version_num[cache_key] >= 100000
-            "pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()"
-          else
-            "pg_last_xlog_receive_location() = pg_last_xlog_replay_location()"
+        unless @aurora_postgresql.key?(cache_key)
+          @aurora_postgresql[cache_key] = connection.select_all("SELECT aurora_version()").any? rescue false
+        end
+
+        if @aurora_postgresql[cache_key]
+          unless @aurora_readonly.key?(cache_key)
+            # first, determine if we are connected to a reader. getting the read_only state seems to be the only real way
+            @aurora_readonly[cache_key] = connection.select_all("SHOW transaction_read_only").first["transaction_read_only"] == "on"
           end
 
-        connection.select_all(
-          "SELECT CASE
-            WHEN NOT pg_is_in_recovery() OR #{lag_condition} THEN 0
-            ELSE EXTRACT (EPOCH FROM NOW() - pg_last_xact_replay_timestamp())
-          END AS lag".squish
-        ).first["lag"].to_f
+          if @aurora_readonly[cache_key]
+            # connected to a reader; unfortunately, there's no way (currently) to get the lag for the _specific_ replica to which we are connected
+            # so, just assume the worst of all the replicas. it's not ideal, but workable.
+            status = connection.select_all("SELECT MAX(replica_lag_in_msec) FROM aurora_replica_status()").first
+            status ? status["max"].to_f / 1000.0 : 0.0
+          else
+            # connected to the master, so no lag
+            0.0
+          end
+        else
+          @server_version_num[cache_key] ||= connection.select_all("SHOW server_version_num").first["server_version_num"].to_i
+          lag_condition =
+            if @server_version_num[cache_key] >= 100000
+              "pg_last_wal_receive_lsn() = pg_last_wal_replay_lsn()"
+            else
+              "pg_last_xlog_receive_location() = pg_last_xlog_replay_location()"
+            end
+          connection.select_all(
+            "SELECT CASE
+              WHEN NOT pg_is_in_recovery() OR #{lag_condition} THEN 0
+              ELSE EXTRACT (EPOCH FROM NOW() - pg_last_xact_replay_timestamp())
+            END AS lag".squish
+          ).first["lag"].to_f
+        end
       when "MySQL", "Mysql2", "Mysql2Spatial", "Mysql2Rgeo"
         @aurora_mysql ||= {}
         cache_key = connection.pool.object_id
