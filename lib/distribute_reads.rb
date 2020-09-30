@@ -49,7 +49,16 @@ module DistributeReads
         cache_key = connection.pool.object_id
 
         unless @aurora_postgresql.key?(cache_key)
-          @aurora_postgresql[cache_key] = connection.select_all("SELECT aurora_version()").any? rescue false
+          begin
+            # create savepoint if in transaction
+            connection.create_savepoint("before_aurora_version_check") if connection.open_transactions > 0
+            @aurora_postgresql[cache_key] = connection.select_all("SELECT aurora_version()").any?
+          rescue
+            # this failure may poison future transactions on the same connection.
+            # rollback to saved savepoint if in transaction
+            connection.exec_rollback_to_savepoint("before_aurora_version_check") if connection.open_transactions > 0
+            @aurora_postgresql[cache_key] = false
+          end
         end
 
         if @aurora_postgresql[cache_key]
