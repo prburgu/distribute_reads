@@ -50,6 +50,7 @@ module DistributeReads
                 # TODO possibly per connection
                 Thread.current[:distribute_reads][:primary] = true
                 Thread.current[:distribute_reads][:replica] = false
+                DistributeReads.log "#{message}. Falling back to master pool."
                 report_lag("distribute_reads.lag", base_model.connection_config[:ic_logical_name], current_lag, max_lag, base_model.name, true, true)
                 break
               else
